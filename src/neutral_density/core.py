@@ -890,8 +890,6 @@ alat_d = np.zeros(45, dtype=np.float32)
 p0_s_global = np.zeros(33, dtype=np.float32)
 n_global = np.zeros((90, 45), dtype=np.int32)
 iocean_global = np.zeros((90, 45), dtype=np.int32)
-i0_global = 1
-j0_global = 1
 stga_data = np.zeros((4050, 4, 33), dtype=np.float32)
 
 

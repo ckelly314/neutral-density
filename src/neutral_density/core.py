@@ -1,6 +1,7 @@
 import numpy as np
 import math
 from numba import njit
+from scipy.io import FortranFile
 
 
 @njit
@@ -882,3 +883,431 @@ def gamma_errors(
     if pth_error < 0.0 or scv_l_error < 0.0 or scv_h_error < 0.0:
         raise ValueError("ERROR 1 in gamma-errors: negative scv error")
     return pth_error, scv_l_error, scv_h_error
+
+
+along_d = np.zeros(90, dtype=np.float32)
+alat_d = np.zeros(45, dtype=np.float32)
+p0_s_global = np.zeros(33, dtype=np.float32)
+n_global = np.zeros((90, 45), dtype=np.int32)
+iocean_global = np.zeros((90, 45), dtype=np.int32)
+i0_global = 1
+j0_global = 1
+stga_data = np.zeros((4050, 4, 33), dtype=np.float32)
+
+
+def init_fdt(llp_path="llp.fdt", stga_path="stga.fdt"):
+    global along_d, alat_d, p0_s_global, n_global, iocean_global, stga_data
+
+    f = FortranFile(llp_path, "r")
+    record = f.read_reals(dtype=np.float32)
+    f.close()
+
+    along_d[:] = record[0:90]
+    alat_d[:] = record[90:135]
+    p0_s_global[:] = record[135:168]
+    n_global[:] = record[168:4218].view(np.int32).reshape((90, 45), order="F")
+    iocean_global[:] = (
+        record[4218:8268].view(np.int32).reshape((90, 45), order="F")
+    )
+
+    raw_stga = np.fromfile(stga_path, dtype=np.float32)
+    stga_data[:] = raw_stga.reshape((-1, 4, 33))
+
+
+@njit
+def read_nc(along, alat, s0, t0, p0, gamma0, a0, n0, along0, alat0, iocean0):
+    nx, nz, ndx, ndy = 90, 33, 4, 4
+
+    i0 = int(along / ndx) + 1
+    j0 = int((88 + alat) / ndy) + 1
+
+    if i0 == nx + 1:
+        i0 = 1
+
+    for k in range(nz):
+        p0[k] = p0_s_global[k]
+
+    along0[0] = along_d[i0 - 1]
+    alat0[0] = alat_d[j0 - 1]
+    alat0[1] = alat0[0] + ndy
+
+    if i0 < nx:
+        along0[1] = along0[0] + ndx
+        krec1 = (i0 - 1) + (j0 - 1) * nx
+        krec2 = i0 + (j0 - 1) * nx
+        krec3 = (i0 - 1) + j0 * nx
+        krec4 = i0 + j0 * nx
+    else:
+        along0[1] = 0.0
+        krec1 = (i0 - 1) + (j0 - 1) * nx
+        krec2 = 0 + (j0 - 1) * nx
+        krec3 = (i0 - 1) + j0 * nx
+        krec4 = 0 + j0 * nx
+
+    for k in range(nz):
+        s0[k, 0, 0] = stga_data[krec1, 0, k]
+        t0[k, 0, 0] = stga_data[krec1, 1, k]
+        gamma0[k, 0, 0] = stga_data[krec1, 2, k]
+        a0[k, 0, 0] = stga_data[krec1, 3, k]
+
+        s0[k, 1, 0] = stga_data[krec2, 0, k]
+        t0[k, 1, 0] = stga_data[krec2, 1, k]
+        gamma0[k, 1, 0] = stga_data[krec2, 2, k]
+        a0[k, 1, 0] = stga_data[krec2, 3, k]
+
+        s0[k, 0, 1] = stga_data[krec3, 0, k]
+        t0[k, 0, 1] = stga_data[krec3, 1, k]
+        gamma0[k, 0, 1] = stga_data[krec3, 2, k]
+        a0[k, 0, 1] = stga_data[krec3, 3, k]
+
+        s0[k, 1, 1] = stga_data[krec4, 0, k]
+        t0[k, 1, 1] = stga_data[krec4, 1, k]
+        gamma0[k, 1, 1] = stga_data[krec4, 2, k]
+        a0[k, 1, 1] = stga_data[krec4, 3, k]
+
+    i0_0 = int(along0[0] / ndx) + 1
+    i0_1 = int(along0[1] / ndx) + 1
+    j0_0 = int((88 + alat0[0]) / ndy) + 1
+    j0_1 = int((88 + alat0[1]) / ndy) + 1
+
+    n0[0, 0] = n_global[i0_0 - 1, j0_0 - 1]
+    n0[1, 0] = n_global[i0_1 - 1, j0_0 - 1]
+    n0[0, 1] = n_global[i0_0 - 1, j0_1 - 1]
+    n0[1, 1] = n_global[i0_1 - 1, j0_1 - 1]
+
+    iocean0[0, 0] = iocean_global[i0_0 - 1, j0_0 - 1]
+    iocean0[1, 0] = iocean_global[i0_1 - 1, j0_0 - 1]
+    iocean0[0, 1] = iocean_global[i0_0 - 1, j0_1 - 1]
+    iocean0[1, 1] = iocean_global[i0_1 - 1, j0_1 - 1]
+
+
+@njit
+def gamma_n(s, t, p, n, along, alat, gamma, dg_lo, dg_hi):
+    nz, ndx, ndy = 33, 4, 4
+    iocean0 = np.zeros((2, 2), dtype=np.int32)
+    n0 = np.zeros((2, 2), dtype=np.int32)
+    along0 = np.zeros(2)
+    alat0 = np.zeros(2)
+    s0 = np.zeros((nz, 2, 2))
+    t0 = np.zeros((nz, 2, 2))
+    p0 = np.zeros(nz)
+    gamma0 = np.zeros((nz, 2, 2))
+    a0 = np.zeros((nz, 2, 2))
+    gwij = np.zeros(4)
+    wtij = np.zeros(4)
+    pr0 = 0.0
+    dgamma_0 = 0.0005
+    dgw_max = 0.3
+
+    if along < 0.0:
+        along += 360.0
+        ialtered = 1
+    elif along == 360.0:
+        along = 0.0
+        ialtered = 2
+    else:
+        ialtered = 0
+
+    if along < 0.0 or along > 360.0 or alat < -90.0 or alat > 90.0:
+        raise ValueError("ERROR 1 in gamma-n.f : out of oceanographic range")
+
+    for k in range(n):
+        if (
+            s[k] < 0.0
+            or s[k] > 42.0
+            or t[k] < -2.5
+            or t[k] > 40.0
+            or p[k] < 0.0
+            or p[k] > 10000.0
+        ):
+            gamma[k] = -99.1
+            dg_lo[k] = -99.1
+            dg_hi[k] = -99.1
+        else:
+            gamma[k] = 0.0
+            dg_lo[k] = 0.0
+            dg_hi[k] = 0.0
+
+    read_nc(along, alat, s0, t0, p0, gamma0, a0, n0, along0, alat0, iocean0)
+
+    dist2_min = 1e10
+    i_min, j_min = 0, 0
+    for j0 in range(2):
+        for i0 in range(2):
+            if n0[i0, j0] != 0:
+                dist2 = (along0[i0] - along) ** 2 + (alat0[j0] - alat) ** 2
+                if dist2 < dist2_min:
+                    i_min = i0
+                    j_min = j0
+                    dist2_min = dist2
+
+    ioce = iocean0[i_min, j_min]
+    dx = abs(along % ndx)
+    dy = abs((alat + 80.0) % ndy)
+    rx = dx / ndx
+    ry = dy / ndy
+
+    for k in range(n):
+        if gamma[k] != -99.1:
+            thk = theta(s[k], t[k], p[k], pr0)
+            dgamma_1 = 0.0
+            dgamma_2_l = 0.0
+            dgamma_2_h = 0.0
+            wsum = 0.0
+            nij = 0
+
+            for j0_idx in range(2):
+                for i0_idx in range(2):
+                    if n0[i0_idx, j0_idx] != 0:
+                        if j0_idx == 0:
+                            if i0_idx == 0:
+                                wt = (1.0 - rx) * (1.0 - ry)
+                            elif i0_idx == 1:
+                                wt = rx * (1.0 - ry)
+                        elif j0_idx == 1:
+                            if i0_idx == 0:
+                                wt = (1.0 - rx) * ry
+                            elif i0_idx == 1:
+                                wt = rx * ry
+
+                        wt += 1e-6
+                        itest = ocean_test(
+                            along,
+                            alat,
+                            ioce,
+                            along0[i0_idx],
+                            alat0[j0_idx],
+                            iocean0[i0_idx, j0_idx],
+                            p[k],
+                        )
+                        if itest == 0:
+                            wt = 0.0
+
+                        sns, tns, pns = depth_ns(
+                            s0[:, i0_idx, j0_idx],
+                            t0[:, i0_idx, j0_idx],
+                            p0,
+                            n0[i0_idx, j0_idx],
+                            s[k],
+                            t[k],
+                            p[k],
+                        )
+
+                        if pns > -99.0:
+                            kns = indx(p0, n0[i0_idx, j0_idx], pns)
+                            gw = gamma_qdr(
+                                p0[kns],
+                                gamma0[kns, i0_idx, j0_idx],
+                                a0[kns, i0_idx, j0_idx],
+                                p0[kns + 1],
+                                gamma0[kns + 1, i0_idx, j0_idx],
+                                pns,
+                            )
+                            g1_err, g2_l_err, g2_h_err = gamma_errors(
+                                s0[:, i0_idx, j0_idx],
+                                t0[:, i0_idx, j0_idx],
+                                p0,
+                                gamma0[:, i0_idx, j0_idx],
+                                a0[:, i0_idx, j0_idx],
+                                n0[i0_idx, j0_idx],
+                                along0[i0_idx],
+                                alat0[j0_idx],
+                                s[k],
+                                t[k],
+                                p[k],
+                                sns,
+                                tns,
+                                pns,
+                                kns,
+                                gw,
+                            )
+                        elif pns == -99.0:
+                            gw, g1_err, g2_l_err, g2_h_err = goor(
+                                s0[:, i0_idx, j0_idx],
+                                t0[:, i0_idx, j0_idx],
+                                p0,
+                                gamma0[:, i0_idx, j0_idx],
+                                n0[i0_idx, j0_idx],
+                                s[k],
+                                t[k],
+                                p[k],
+                            )
+                            if (
+                                gw
+                                > gamma0[
+                                    n0[i0_idx, j0_idx] - 1, i0_idx, j0_idx
+                                ]
+                            ):
+                                rw = (
+                                    min(
+                                        dgw_max,
+                                        gw
+                                        - gamma0[
+                                            n0[i0_idx, j0_idx] - 1,
+                                            i0_idx,
+                                            j0_idx,
+                                        ],
+                                    )
+                                    / dgw_max
+                                )
+                                wt = (1.0 - rw) * wt
+                        else:
+                            gw = 0.0
+                            g1_err = 0.0
+                            g2_l_err = 0.0
+                            g2_h_err = 0.0
+
+                        if gw > 0.0:
+                            gamma[k] += wt * gw
+                            dgamma_1 += wt * g1_err
+                            dgamma_2_l = max(dgamma_2_l, g2_l_err)
+                            dgamma_2_h = max(dgamma_2_h, g2_h_err)
+                            wsum += wt
+                            wtij[nij] = wt
+                            gwij[nij] = gw
+                            nij += 1
+
+            if wsum != 0.0:
+                gamma[k] /= wsum
+                dgamma_1 /= wsum
+                dgamma_3 = 0.0
+                for ij in range(nij):
+                    dgamma_3 += wtij[ij] * abs(gwij[ij] - gamma[k])
+                dgamma_3 /= wsum
+                dg_lo[k] = max(dgamma_0, dgamma_1, dgamma_2_l, dgamma_3)
+                dg_hi[k] = max(dgamma_0, dgamma_1, dgamma_2_h, dgamma_3)
+            else:
+                gamma[k] = -99.0
+                dg_lo[k] = -99.0
+                dg_hi[k] = -99.0
+
+    if ialtered == 1:
+        along -= 360.0
+    elif ialtered == 2:
+        along = 360.0
+
+
+@njit
+def neutral_surfaces(
+    s, t, p, gamma, n, glevels, ng, sns, tns, pns, dsns, dtns, dpns
+):
+    nint_max = 50
+    int_arr = np.zeros(nint_max, dtype=np.int32)
+    n2 = 2
+    pr0 = 0.0
+    ptol = 1.0e-3
+    in_error = 0
+
+    for k in range(n):
+        if gamma[k] <= 0.0:
+            in_error = 1
+
+    if in_error == 1:
+        raise ValueError("ERROR 1 in neutral-surfaces.f : missing gamma value")
+
+    for ig in range(ng):
+        nint = 0
+        for k in range(n - 1):
+            gmin = min(gamma[k], gamma[k + 1])
+            gmax = max(gamma[k], gamma[k + 1])
+            if gmin <= glevels[ig] <= gmax:
+                int_arr[nint] = k
+                nint += 1
+                if nint > nint_max:
+                    raise ValueError("ERROR 2 in neutral-surfaces.f")
+
+        if nint == 0:
+            sns[ig] = -99.0
+            tns[ig] = -99.0
+            pns[ig] = -99.0
+            dsns[ig] = 0.0
+            dtns[ig] = 0.0
+            dpns[ig] = 0.0
+        else:
+            if nint % 2 == 0 and int_arr[0] > (n - 1) // 2:
+                int_middle = (nint + 2) // 2
+            else:
+                int_middle = (nint + 1) // 2
+
+            for i_int in range(nint):
+                k = int_arr[i_int]
+                pmid = (p[k] + p[k + 1]) / 2.0
+                thdum, sthdum, alfa_l, beta_l, gdum, sdum = eosall(
+                    s[k], t[k], p[k]
+                )
+                thdum, sthdum, alfa_u, beta_u, gdum, sdum = eosall(
+                    s[k + 1], t[k + 1], p[k + 1]
+                )
+                alfa_mid = (alfa_l + alfa_u) / 2.0
+                beta_mid = (beta_l + beta_u) / 2.0
+                smid, tmid = stp_interp(
+                    s[k : k + 2], t[k : k + 2], p[k : k + 2], n2, pmid
+                )
+                sd, sigmid = svan(smid, tmid, pmid)
+                rhomid = 1000.0 + sigmid
+                thl = theta(s[k], t[k], p[k], pr0)
+                thu = theta(s[k + 1], t[k + 1], p[k + 1], pr0)
+                dels = s[k + 1] - s[k]
+                delth = thu - thl
+                pl = p[k]
+                pu = p[k + 1]
+                delp = pu - pl
+                delp2 = delp * delp
+                bden = rhomid * (beta_mid * dels - alfa_mid * delth)
+                if abs(bden) <= 1e-6:
+                    bden = 1e-6
+                bmid = (gamma[k + 1] - gamma[k]) / bden
+
+                a = dels * (beta_u - beta_l) - delth * (alfa_u - alfa_l)
+                a = (a * bmid * rhomid) / (2.0 * delp2)
+                b = dels * (pu * beta_l - pl * beta_u) - delth * (
+                    pu * alfa_l - pl * alfa_u
+                )
+                b = (b * bmid * rhomid) / delp2
+                c = dels * (beta_l * (pl - 2.0 * pu) + beta_u * pl) - delth * (
+                    alfa_l * (pl - 2.0 * pu) + alfa_u * pl
+                )
+                c = gamma[k] + (bmid * rhomid * pl * c) / (2.0 * delp2)
+                c = c - glevels[ig]
+
+                if a != 0.0 and bden != 1e-6:
+                    q = -(b + np.sign(b) * np.sqrt(b * b - 4 * a * c)) / 2.0
+                    pns1 = q / a
+                    pns2 = c / q
+                    if p[k] - ptol <= pns1 <= p[k + 1] + ptol:
+                        pns[ig] = min(p[k + 1], max(pns1, p[k]))
+                    elif p[k] - ptol <= pns2 <= p[k + 1] + ptol:
+                        pns[ig] = min(p[k + 1], max(pns2, p[k]))
+                    else:
+                        raise ValueError("ERROR 3 in neutral-surfaces.f")
+                else:
+                    rg = (glevels[ig] - gamma[k]) / (gamma[k + 1] - gamma[k])
+                    pns[ig] = p[k] + rg * (p[k + 1] - p[k])
+
+                sns[ig], tns[ig] = stp_interp(s, t, p, n, pns[ig])
+
+                if nint > 1:
+                    if i_int == 0:
+                        sns_top = sns[ig]
+                        tns_top = tns[ig]
+                        pns_top = pns[ig]
+                    elif i_int == int_middle - 1:
+                        sns_middle = sns[ig]
+                        tns_middle = tns[ig]
+                        pns_middle = pns[ig]
+                    elif i_int == nint - 1:
+                        if (pns_middle - pns_top) > (pns[ig] - pns_middle):
+                            dsns[ig] = sns_middle - sns_top
+                            dtns[ig] = tns_middle - tns_top
+                            dpns[ig] = pns_middle - pns_top
+                        else:
+                            dsns[ig] = sns[ig] - sns_middle
+                            dtns[ig] = tns[ig] - tns_middle
+                            dpns[ig] = pns[ig] - pns_middle
+                        sns[ig] = sns_middle
+                        tns[ig] = tns_middle
+                        pns[ig] = pns_middle
+                else:
+                    dsns[ig] = 0.0
+                    dtns[ig] = 0.0
+                    dpns[ig] = 0.0

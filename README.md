@@ -102,6 +102,37 @@ Given a cast with S, T, P, and neutral densities, the S, T, and P at user-specif
 > [!TIP]
 > Output values of `-99.0` indicate the surface outcropped or undercropped the cast. Like `gamma_n`, this function always returns 1D NumPy arrays for consistency.
 
+## Calculate neutral surfaces along a transect
+
+```python
+import numpy as np
+from neutral_density import transect as tx
+
+# γn for every bottle
+cc = tx.gamma_transect("33RO20131223_hy1.csv")
+
+# or: pre-parse and reuse
+df = tx.read_goship_hy1("33RO20131223_hy1.csv")
+cc = tx.gamma_transect(df)
+
+# AABW/NADW/AAIW neutral surfaces
+glevels = np.arange(26.0, 28.5, 0.1)
+sc = tx.neutral_surface_transect(cc, glevels)   # reuses cc; no redundant γn calc
+
+# Section-ready arrays
+print(sc.pressure.shape)   # (25, 113) — surfaces × stations
+print(sc.latitudes)        # latitude at each station along-section
+```
+
+### read_goship_hy1(filepath)
+Parses any WHP-Exchange .hy1 file into a clean DataFrame. Replaces −999 fill values with NaN, drops bottles where CTDSAL_FLAG_W > 2 (configurable), sorts by pressure, and appends a longitude_360 column so gamma_n gets the 0→360 convention it expects.
+
+### gamma_transect(source)
+Iterates cast-by-cast over the file (or a pre-parsed DataFrame), calls gamma_n() for each one, and returns a CastCollection. Each CastResult in the collection holds the pressure/S/T arrays alongside gamma, gamma_lo, and gamma_hi. .to_dataframe() flattens everything into a long-format DataFrame ready for section plots.
+
+### neutral_surface_transect(source, glevels)
+Takes the same source (or a pre-computed CastCollection to avoid redundant γn work), calls neutral_surfaces() per cast, and returns a SurfaceCollection whose core arrays are shaped (n_surfaces, n_casts) — exactly the layout you'd hand to a Cartopy/matplotlib section plot. Outcrops/undercrops are NaN rather than the −99.0 sentinel. .to_dataframe() gives a long format.
+
 ## Speed
 
 For raw numerical execution, you won't easily beat Fortran. This package provides high-level Python accessibility while approaching Fortran speeds by using Numba just-in-time (JIT) compilation.
